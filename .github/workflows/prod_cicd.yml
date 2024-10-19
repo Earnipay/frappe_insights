@@ -1,0 +1,92 @@
+name: Production Deployment Pipeline
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: fastapi-insights
+  ECS_SERVICE: fastapi-api-prod
+  ECS_CLUSTER: fastapi-prod-cluster
+  CONTAINER_NAME: fastapi-app
+  TASK_DEFINITION: fastapi-api-prod
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: true
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        with:
+          images: |
+            ${{ steps.login-ecr.outputs.registry}}/${{ env.ECR_REPOSITORY}}
+          tags: ${{ github.sha }}
+
+      - name: Build and Push to Amazon ECR
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Download task definition
+        run: aws ecs describe-task-definition --task-definition ${{ env.TASK_DEFINITION }} --query taskDefinition > task-definition.json
+
+      - name: Update ECS Task Definition
+        id: update-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.login-ecr.outputs.registry}}/${{ env.ECR_REPOSITORY}}:${{ github.sha }}
+
+      - name: Deploy ECS Task Definition
+        id: deploy-task-def
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: false
